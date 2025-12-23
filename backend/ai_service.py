@@ -12,7 +12,10 @@ class AIService:
         
     async def analyze_image(self, file_bytes: bytes) -> List[Tag]:
         # Retry logic for model loading (cold start)
-        max_retries = 3
+        # Without an API key, the free tier puts models to sleep. We need more patience.
+        max_retries = 15
+        delay = 5
+        
         # Ideally, user should set this env var. If not, it might hit rate limits or require one.
         api_key = os.environ.get("HF_API_KEY")
         
@@ -27,8 +30,8 @@ class AIService:
                 
                 # 503 means the model is loading on the server side
                 if response.status_code == 503:
-                    print("Model loading on server... retrying")
-                    time.sleep(2)
+                    print(f"Model loading on server... retrying ({attempt+1}/{max_retries})")
+                    time.sleep(delay)
                     continue
                     
                 if response.status_code != 200:
