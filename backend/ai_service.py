@@ -1,42 +1,63 @@
-import io
-from PIL import Image
-from transformers import pipeline
+import requests
+import os
+import time
 from typing import List
 from .models import Tag
 
 class AIService:
     def __init__(self):
-        print("Loading AI Model (this may take a moment on first run)...")
-        # specific model for better results, using BLIP for captioning
-        self.classifier = pipeline("image-to-text", model="Salesforce/blip-image-captioning-base")
-        print("AI Model Loaded successfully!")
-
+        # We use the free Hugging Face Inference API
+        self.api_url = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-base"
+        print("AI Service initialized in Cloud API Mode (Lightweight)")
+        
     async def analyze_image(self, file_bytes: bytes) -> List[Tag]:
-        """
-        Analyzes the image using BLIP to generate a caption, then extracts tags.
-        """
-        # Convert bytes to PIL Image
-        image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
+        # Retry logic for model loading (cold start)
+        max_retries = 3
+        # Ideally, user should set this env var. If not, it might hit rate limits or require one.
+        api_key = os.environ.get("HF_API_KEY")
         
-        # Run inference to get caption
-        # results = [{'generated_text': 'a man smiling...'}]
-        results = self.classifier(image)
-        caption = results[0]['generated_text']
-        
-        # Simple extraction strategy: Split caption into words, filter common stopwords
-        # In a real app, you might use a lightweight NLP lib (spacy/nltk), 
-        # but for this MVP, we'll confirm 3-5 key words.
-        
-        stopwords = {"a", "an", "the", "on", "in", "with", "of", "and", "is", "to", "at", "looking", "camera", "standing", "sitting"}
-        words = caption.replace(".", "").lower().split()
-        
-        unique_tags = []
-        for word in words:
-            if word not in stopwords and len(word) > 2:
-                # Capitalize
-                tag_label = word.title()
-                if tag_label not in [t.label for t in unique_tags]:
-                     # Mock confidence for caption words as they are high confidence by definition of the model
-                    unique_tags.append(Tag(label=tag_label, confidence=0.95))
-
-        return unique_tags
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+            
+        for attempt in range(max_retries):
+            try:
+                # Post raw bytes directly to the API
+                response = requests.post(self.api_url, headers=headers, data=file_bytes)
+                
+                # 503 means the model is loading on the server side
+                if response.status_code == 503:
+                    print("Model loading on server... retrying")
+                    time.sleep(2)
+                    continue
+                    
+                if response.status_code != 200:
+                    print(f"API Error: {response.status_code} - {response.text}")
+                    return [Tag(label="API Error", confidence=0.0)]
+                    
+                result = response.json()
+                if isinstance(result, list) and len(result) > 0:
+                     # BLIP returns: [{'generated_text': 'a photography of a cat...'}]
+                    caption = result[0].get("generated_text", "")
+                    
+                    # Tag extraction logic
+                    stopwords = {"a", "an", "the", "on", "in", "with", "of", "and", "is", "to", "at", "looking", "camera", "standing", "sitting"}
+                    words = caption.replace(".", "").lower().split()
+                    
+                    unique_tags = []
+                    for word in words:
+                        if word not in stopwords and len(word) > 2:
+                            tag_label = word.title()
+                            if tag_label not in [t.label for t in unique_tags]:
+                                unique_tags.append(Tag(label=tag_label, confidence=0.95))
+                                
+                    return unique_tags
+                
+                return [Tag(label="No Data", confidence=0.0)]
+                
+            except Exception as e:
+                print(f"Connection Error: {e}")
+                if attempt == max_retries - 1:
+                    return [Tag(label="Service Unavailable", confidence=0.0)]
+                    
+        return [Tag(label="Timeout", confidence=0.0)]
